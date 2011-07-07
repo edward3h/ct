@@ -1,0 +1,275 @@
+#!/usr/bin/env ruby
+require 'pathname'
+require 'rubygems'
+require 'twitter'
+require 'oauth'
+require 'net/netrc'
+require 'yaml'
+require 'date'
+#require 'activesupport'
+require 'uri'
+require 'fileutils'
+require 'launchy'
+
+# add file directory to search path
+$: << File.expand_path(File.dirname(Pathname.new(__FILE__).realpath))
+require 'text_color'
+require 'mybitly'
+
+CONFIG = {:ckey => 'RtOcXchF9jCD4Ol3dUG9Ww', :csecret => 'pc8KGti4SzitEDnk02GvWftFc6loebUROinzN5irjD4'}
+
+SEEN_FILE = File.join(ENV['HOME'], '.ctseen')
+COLORS = {}
+COLORS[:friends_timeline] = ColorScheme.new(
+    TextColor.new.exp(/(\@)([A-Za-z0-9]+)/).yellow.blue,
+    TextColor.new.exp(/http\:\/\/[^ ]+/).underline.blue,
+    TextColor.new.exp(/\#\S+/).red
+)
+
+COLORS[:friends_timeline_sender] = ColorScheme.new(
+    TextColor.new.exp(/[A-Za-z0-9]+/).blue.on.silver,
+    TextColor.new.exp(/\<|\>/).silver.bold.on.silver
+)
+
+COLORS[:direct_messages] = ColorScheme.new(
+    TextColor.new.exp(/\S+/).green,
+    TextColor.new.exp(/(\@)([A-Za-z0-9]+)/).yellow.blue,
+    TextColor.new.exp(/http\:\/\/[^ ]+/).underline.blue,
+    TextColor.new.exp(/\#\S+/).red
+)
+
+COLORS[:direct_messages_sender] = ColorScheme.new(
+    TextColor.new.exp(/[A-Za-z0-9]+/).yellow.on.green,
+    TextColor.new.exp(/\<|\>/).silver.bold.on.green
+)
+
+COLORS[:mentions] = ColorScheme.new(
+    TextColor.new.exp(/\S+/).purple,
+    TextColor.new.exp(/(\@)([A-Za-z0-9]+)/).yellow.blue,
+    TextColor.new.exp(/http\:\/\/[^ ]+/).underline.blue,
+    TextColor.new.exp(/\#\S+/).red
+)
+
+COLORS[:mentions_sender] = ColorScheme.new(
+    TextColor.new.exp(/[A-Za-z0-9]+/).cyan.bold.on.purple,
+    TextColor.new.exp(/\<|\>/).silver.on.purple
+)
+
+$token = 'RtOcXchF9jCD4Ol3dUG9Ww'
+$secret = 'pc8KGti4SzitEDnk02GvWftFc6loebUROinzN5irjD4'
+
+class MsgInfo
+    attr_reader :msg, :type
+    def initialize(msg, type)
+        @msg = msg
+        @type = type
+        @cs = COLORS[type] || COLORS[:friends_timeline]
+    end
+
+    def render_sender
+        cs = COLORS[(type.to_s + '_sender').to_sym] || COLORS[:friends_timeline_sender]
+        print cs.apply("<#{(@msg.user || @msg.sender).screen_name}> ")
+    end
+
+    def render
+        render_sender
+        t = text
+        t = @cs.apply(t) if t
+        print t, "\n"
+    end
+
+    def ==(other)
+        self.msg.id == other.msg.id 
+    end
+
+    def created
+        @created ||= DateTime.parse(self.msg.created_at)
+    end
+
+    def <=>(other)
+        self.created <=> other.created
+    end
+
+    def urls
+        @msg.text.scan(/http\:\/\/[^ ]+/)
+    end
+
+    def text
+        @expanded || @msg.text
+    end
+    
+    def plaintext
+        text.gsub(/\@[A-Za-z0-9]+|\#\S+|http\:\/\/[^ ]+/,'').strip
+    end
+
+    def expand(url_mapping)
+        @expanded = @msg.text.gsub(/http\:\/\/[^ ]+/) do |short|
+            url_mapping[short] || short
+        end if @msg.text
+    end
+end
+
+class MPDPlug
+    def apply(msg)
+        if @mpd && msg && msg.text && msg.text =~ /\#MPD(\W|$)/i
+            songs = @mpd.search('title', msg.plaintext)
+            if songs && !songs.empty?
+                @mpd.add(songs[rand(songs.size)].file)
+            end
+        end
+    end
+    
+    def setup
+        begin
+            @mpd = MPD.new 'localhost', 6600
+            @mpd.connect
+        rescue
+            @mpd = nil
+        end
+    end
+    
+    def teardown
+        @mpd.disconnect if @mpd
+    end
+end
+
+def plugins
+    if @pl
+        @pl
+    else
+        @pl = []
+        begin 
+        	if(require 'librmpd')
+            		@pl << MPDPlug.new
+        	end
+        rescue LoadError
+	end
+        @pl
+    end
+end
+
+def twitter(config)
+    unless @twitter
+        oauth = OAuth::Consumer.new($token, $secret, :site => 'http://api.twitter.com', :request_endpoint => 'http://api.twitter.com', :sign_in => true)
+        if(config[:access] && config[:asecret])
+            atoken = OAuth::AccessToken.new(oauth, config[:access], config[:asecret])
+        else
+            request_token = oauth.get_request_token
+            rtoken  = request_token.token
+            rsecret = request_token.secret
+
+            puts "> redirecting you to twitter to authorize..."
+            Launchy.open(request_token.authorize_url)
+            print "> what was the PIN twitter provided you with? "
+            pin = gets.chomp
+            puts "using pin #{pin}"
+
+            atoken = request_token.get_access_token(:oauth_verifier => pin)
+            config[:access], config[:asecret] = atoken.token, atoken.secret
+        end
+        Twitter.configure do |config|
+          config.consumer_key = $token
+          config.consumer_secret = $secret
+          config.oauth_token = atoken.token
+          config.oauth_token_secret = atoken.secret
+        end
+        @twitter = Twitter::Client.new
+    end
+    @twitter
+end
+
+def bitly
+    @bitly ||= Bitly.new('edward3h', 'R_23890e74795d6d3769d3a3ad3d609468')
+end
+
+def update(msg)
+    msg = shorten(msg)
+    if msg.length > 140
+        puts "Message too long".color.red.apply
+        puts msg.color.black.black.on.red.apply(/(.{140,140})(.+)/)
+    else
+        config = YAML.load_file(SEEN_FILE) || {}
+        twitter(config).update(msg)
+        File.open(SEEN_FILE, 'w') do |out|
+            YAML.dump(config, out)
+        end
+    end
+end
+
+def shorten(msg)
+    urls = msg.scan(/http\:\/\/[^ ]+/)
+    if urls && !urls.empty?
+        u = bitly.shorten(urls)
+        mapping = u.inject({}) {|h, url| h[url.long_url] = url.short_url; h}
+        msg.gsub(/http\:\/\/[^ ]+/) do |long|
+            mapping[long]
+        end
+    else
+        msg
+    end
+end
+
+
+def get_messages(seen_id, type)
+    opts = {}
+    opts[:since_id] = seen_id[type] if seen_id[type]
+    twtr = twitter(seen_id)
+    msgs = twtr.send(type, opts)
+    seen_id[type] = msgs.first.id if msgs && !msgs.empty?
+    msgs.map{|m| MsgInfo.new(m, type)}
+end
+
+def read
+    begin
+        return if Time.now - File.mtime(SEEN_FILE) < 8 * 60 #don't check more frequently than once every 8 minutes
+        FileUtils.touch(SEEN_FILE)
+        seen_id = YAML.load_file(SEEN_FILE)
+    rescue
+        p $!
+        seen_id = {}
+    end
+    fmsgs = get_messages(seen_id, :friends_timeline)
+    dmsgs = [] #get_messages(seen_id, :direct_messages)
+    tmsgs = get_messages(seen_id, :mentions)
+    File.open(SEEN_FILE, 'w') do |out|
+        YAML.dump(seen_id, out)
+    end
+    all_msgs = [fmsgs, dmsgs, tmsgs].flatten.uniq.sort
+    expand(all_msgs)
+    plugins.each { |plugin| plugin.setup() }
+    all_msgs.each do |msg| 
+        plugins.each { |plugin| plugin.apply(msg) }
+        msg.render
+    end
+    plugins.each { |plugin| plugin.teardown() }
+end
+
+BITLY_DOMAINS = ['bit.ly', 'j.mp']
+
+def bitly_url?(u)
+    BITLY_DOMAINS.include?(URI.parse(u).host)
+end
+
+def expand(all_msgs)
+    short_urls = all_msgs.map{|m| m.urls}.flatten.select{|u| bitly_url?(u)}
+    return if short_urls.empty?
+    long_urls = [bitly.expand(short_urls)].flatten
+    mapping = {}
+    long_urls.each do |u| 
+        mapping[u.short_url] = u.long_url
+    end
+    all_msgs.each{|m| m.expand(mapping)}
+end
+
+if(STDIN.isatty && ARGV.length > 0)
+    msg = ARGV.join " "
+elsif(!STDIN.isatty)
+    msg = STDIN.read
+end
+
+if(msg && msg.strip.length > 0)
+    update(msg)
+else
+    read
+end
+
