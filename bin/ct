@@ -12,21 +12,25 @@ require 'fileutils'
 require 'launchy'
 
 # add file directory to search path
-$: << File.expand_path(File.dirname(Pathname.new(__FILE__).realpath))
+$: << File.expand_path('../lib/ct/', File.dirname(Pathname.new(__FILE__).realpath))
 require 'text_color'
 require 'mybitly'
 
 CONFIG = {:ckey => 'RtOcXchF9jCD4Ol3dUG9Ww', :csecret => 'pc8KGti4SzitEDnk02GvWftFc6loebUROinzN5irjD4'}
 
+def debug(*args)
+#    puts "DEBUG: #{args.join(' ')}"
+end
+
 SEEN_FILE = File.join(ENV['HOME'], '.ctseen')
 COLORS = {}
-COLORS[:friends_timeline] = ColorScheme.new(
+COLORS[:home_timeline] = ColorScheme.new(
     TextColor.new.exp(/(\@)([A-Za-z0-9]+)/).yellow.blue,
     TextColor.new.exp(/http\:\/\/[^ ]+/).underline.blue,
     TextColor.new.exp(/\#\S+/).red
 )
 
-COLORS[:friends_timeline_sender] = ColorScheme.new(
+COLORS[:home_timeline_sender] = ColorScheme.new(
     TextColor.new.exp(/[A-Za-z0-9]+/).blue.on.silver,
     TextColor.new.exp(/\<|\>/).silver.bold.on.silver
 )
@@ -63,11 +67,11 @@ class MsgInfo
     def initialize(msg, type)
         @msg = msg
         @type = type
-        @cs = COLORS[type] || COLORS[:friends_timeline]
+        @cs = COLORS[type] || COLORS[:home_timeline]
     end
 
     def render_sender
-        cs = COLORS[(type.to_s + '_sender').to_sym] || COLORS[:friends_timeline_sender]
+        cs = COLORS[(type.to_s + '_sender').to_sym] || COLORS[:home_timeline_sender]
         print cs.apply("<#{(@msg.user || @msg.sender).screen_name}> ")
     end
 
@@ -83,7 +87,7 @@ class MsgInfo
     end
 
     def created
-        @created ||= DateTime.parse(self.msg.created_at)
+        @created ||= self.msg.created_at
     end
 
     def <=>(other)
@@ -153,19 +157,29 @@ def twitter(config)
         oauth = OAuth::Consumer.new($token, $secret, :site => 'http://api.twitter.com', :request_endpoint => 'http://api.twitter.com', :sign_in => true)
         if(config[:access] && config[:asecret])
             atoken = OAuth::AccessToken.new(oauth, config[:access], config[:asecret])
-        else
+            debug("authenticated")
+        elsif(STDIN.isatty)
             request_token = oauth.get_request_token
             rtoken  = request_token.token
             rsecret = request_token.secret
 
             puts "> redirecting you to twitter to authorize..."
+            debug("opening auth URL", request_token.authorize_url)
+            puts "> what was the PIN twitter provided you with? "
             Launchy.open(request_token.authorize_url)
-            print "> what was the PIN twitter provided you with? "
-            pin = gets.chomp
+            pin = nil
+            until(pin && pin =~ /\d+/)
+                debug(pin)
+                puts "> what was the PIN twitter provided you with? "
+                pin = STDIN.gets.chomp
+            end
             puts "using pin #{pin}"
 
             atoken = request_token.get_access_token(:oauth_verifier => pin)
             config[:access], config[:asecret] = atoken.token, atoken.secret
+        else
+            puts "Requires authentication, but not running in a TTY"
+            exit 1
         end
         Twitter.configure do |config|
           config.consumer_key = $token
@@ -211,8 +225,9 @@ end
 
 
 def get_messages(seen_id, type)
-    opts = {}
-    opts[:since_id] = seen_id[type] if seen_id[type]
+    opts = {:count => 100}
+    opts[:since_id] = seen_id[type] if seen_id && seen_id[type]
+    debug("getting messages", type, opts)
     twtr = twitter(seen_id)
     msgs = twtr.send(type, opts)
     seen_id[type] = msgs.first.id if msgs && !msgs.empty?
@@ -221,20 +236,19 @@ end
 
 def read
     begin
-        return if Time.now - File.mtime(SEEN_FILE) < 8 * 60 #don't check more frequently than once every 8 minutes
+        return if Time.now - File.mtime(SEEN_FILE) < 5 * 60 #don't check more frequently than once every 5 minutes
         FileUtils.touch(SEEN_FILE)
         seen_id = YAML.load_file(SEEN_FILE)
     rescue
         p $!
         seen_id = {}
     end
-    fmsgs = get_messages(seen_id, :friends_timeline)
-    dmsgs = [] #get_messages(seen_id, :direct_messages)
+    fmsgs = get_messages(seen_id, :home_timeline)
     tmsgs = get_messages(seen_id, :mentions)
     File.open(SEEN_FILE, 'w') do |out|
         YAML.dump(seen_id, out)
     end
-    all_msgs = [fmsgs, dmsgs, tmsgs].flatten.uniq.sort
+    all_msgs = [fmsgs, tmsgs].flatten.uniq.sort
     expand(all_msgs)
     plugins.each { |plugin| plugin.setup() }
     all_msgs.each do |msg| 
@@ -268,8 +282,10 @@ elsif(!STDIN.isatty)
 end
 
 if(msg && msg.strip.length > 0)
+    debug("posting a message:", msg)
     update(msg)
 else
+    debug("reading")
     read
 end
 
