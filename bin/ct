@@ -71,7 +71,7 @@ class MsgInfo
     end
 
     def render_sender
-        cs = COLORS[(type.to_s + '_sender').to_sym] || COLORS[:home_timeline_sender]
+        cs = COLORS["user_#{(@msg.user || @msg.sender).screen_name}"] || COLORS[(type.to_s + '_sender').to_sym] || COLORS[:home_timeline_sender]
         print cs.apply("<#{(@msg.user || @msg.sender).screen_name}> ")
     end
 
@@ -234,6 +234,16 @@ def get_messages(seen_id, type)
     msgs.map{|m| MsgInfo.new(m, type)}
 end
 
+def read_user_colors(config)
+	config.each do |user, color|
+		next unless (0..7).include? color.to_i
+		COLORS["user_#{user}"] = ColorScheme.new(
+    TextColor.new.exp(/[A-Za-z0-9]+/).black.on.set_color(color.to_i),
+    TextColor.new.exp(/\<|\>/).silver.bold.on.silver
+)		
+	end
+end
+
 def read
     begin
         return if Time.now - File.mtime(SEEN_FILE) < 5 * 60 #don't check more frequently than once every 5 minutes
@@ -243,6 +253,7 @@ def read
         p $!
         seen_id = {}
     end
+    read_user_colors(seen_id[:colors]) if seen_id[:colors]
     fmsgs = get_messages(seen_id, :home_timeline)
     tmsgs = get_messages(seen_id, :mentions)
     File.open(SEEN_FILE, 'w') do |out|
