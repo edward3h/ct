@@ -1,3 +1,9 @@
+Status
+------
+I am not currently supporting this tool - Twitter keep making it more difficult for developers.
+
+---
+
 This is a ruby command line twitter client.
 
 It depends on a whole bunch of gems being installed. Something like this should help:
